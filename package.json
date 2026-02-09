@@ -850,7 +850,7 @@
     "build": "npm run build:client && npm run build:server && npm run build:servercopy",
     "build:client": "tsc -p ./",
     "build:server": "tsc -p server",
-    "build:servercopy": "mkdir -p out && (cp server/out/src/server.js out/server.js || true) && (cp server/out/src/server.js server/out/server.js || true)",
+    "build:servercopy": "mkdir -p out server/out && (cp server/out/src/server.js out/server.js || true) && (cp -R server/out/src/* server/out/ || true)",
     "watch": "tsc -w -p ./",
     "compile": "npm run build",
     "lint": "eslint .",
