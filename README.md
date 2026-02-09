@@ -14,8 +14,6 @@
 **GitHub**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/vitte-lang/VitteLangVsCode/ci.yml?branch=main)](https://github.com/vitte-lang/VitteLangVsCode/actions)
-[![Webpack](https://img.shields.io/github/actions/workflow/status/vitte-lang/VitteLangVsCode/webpack.yml?branch=main)](https://github.com/vitte-lang/VitteLangVsCode/actions)
-[![Release](https://img.shields.io/github/v/release/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode/releases)
 [![License](https://img.shields.io/github/license/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode/blob/main/LICENSE)
 [![Stars](https://img.shields.io/github/stars/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode)
 [![Forks](https://img.shields.io/github/forks/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode)
@@ -219,30 +217,6 @@ MIT
 
 **Vitte Studio** is the official VS Code extension for the Vitte language. It delivers a complete developer experience: syntax highlighting, rich IntelliSense, hover docs, diagnostics, navigation, formatting, semantic tokens, debugging, tasks, and project tooling for real-world Vitte codebases.
 
-## Badges
-
-**Marketplace**
-
-[![Version](https://img.shields.io/visual-studio-marketplace/v/VitteStudio.vitte-studio)](https://marketplace.visualstudio.com/items?itemName=VitteStudio.vitte-studio)
-[![Installs](https://img.shields.io/visual-studio-marketplace/i/VitteStudio.vitte-studio)](https://marketplace.visualstudio.com/items?itemName=VitteStudio.vitte-studio)
-[![Downloads](https://img.shields.io/visual-studio-marketplace/d/VitteStudio.vitte-studio)](https://marketplace.visualstudio.com/items?itemName=VitteStudio.vitte-studio)
-[![Rating](https://img.shields.io/visual-studio-marketplace/r/VitteStudio.vitte-studio)](https://marketplace.visualstudio.com/items?itemName=VitteStudio.vitte-studio)
-[![Last Updated](https://img.shields.io/visual-studio-marketplace/last-updated/VitteStudio.vitte-studio)](https://marketplace.visualstudio.com/items?itemName=VitteStudio.vitte-studio)
-
-**GitHub**
-
-[![CI](https://img.shields.io/github/actions/workflow/status/vitte-lang/VitteLangVsCode/ci.yml?branch=main)](https://github.com/vitte-lang/VitteLangVsCode/actions)
-[![Webpack](https://img.shields.io/github/actions/workflow/status/vitte-lang/VitteLangVsCode/webpack.yml?branch=main)](https://github.com/vitte-lang/VitteLangVsCode/actions)
-[![Release](https://img.shields.io/github/v/release/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode/releases)
-[![License](https://img.shields.io/github/license/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode/blob/main/LICENSE)
-[![Stars](https://img.shields.io/github/stars/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode)
-[![Forks](https://img.shields.io/github/forks/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode)
-[![Issues](https://img.shields.io/github/issues/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode/issues)
-[![PRs](https://img.shields.io/github/issues-pr/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode/pulls)
-[![Contributors](https://img.shields.io/github/contributors/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode/graphs/contributors)
-[![Last Commit](https://img.shields.io/github/last-commit/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode/commits/main)
-[![Repo Size](https://img.shields.io/github/repo-size/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode)
-
 ## Marketplace Descriptions
 
 **Short**
@@ -254,29 +228,6 @@ Vitte Studio is the official VS Code extension for the Vitte language — syntax
 
 **Vitte Studio** is the official VS Code extension for the Vitte language. It delivers a complete developer experience: syntax highlighting, rich IntelliSense, hover docs, diagnostics, navigation, formatting, semantic tokens, debugging, tasks, and project tooling for real-world Vitte codebases.
 
-## Badges
-
-**Marketplace**
-
-[![Version](https://img.shields.io/visual-studio-marketplace/v/VitteStudio.vitte-studio)](https://marketplace.visualstudio.com/items?itemName=VitteStudio.vitte-studio)
-[![Installs](https://img.shields.io/visual-studio-marketplace/i/VitteStudio.vitte-studio)](https://marketplace.visualstudio.com/items?itemName=VitteStudio.vitte-studio)
-[![Downloads](https://img.shields.io/visual-studio-marketplace/d/VitteStudio.vitte-studio)](https://marketplace.visualstudio.com/items?itemName=VitteStudio.vitte-studio)
-[![Rating](https://img.shields.io/visual-studio-marketplace/r/VitteStudio.vitte-studio)](https://marketplace.visualstudio.com/items?itemName=VitteStudio.vitte-studio)
-[![Last Updated](https://img.shields.io/visual-studio-marketplace/last-updated/VitteStudio.vitte-studio)](https://marketplace.visualstudio.com/items?itemName=VitteStudio.vitte-studio)
-
-**GitHub**
-
-[![CI](https://img.shields.io/github/actions/workflow/status/vitte-lang/VitteLangVsCode/ci.yml?branch=main)](https://github.com/vitte-lang/VitteLangVsCode/actions)
-[![Webpack](https://img.shields.io/github/actions/workflow/status/vitte-lang/VitteLangVsCode/webpack.yml?branch=main)](https://github.com/vitte-lang/VitteLangVsCode/actions)
-[![Release](https://img.shields.io/github/v/release/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode/releases)
-[![License](https://img.shields.io/github/license/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode/blob/main/LICENSE)
-[![Stars](https://img.shields.io/github/stars/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode)
-[![Forks](https://img.shields.io/github/forks/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode)
-[![Issues](https://img.shields.io/github/issues/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode/issues)
-[![PRs](https://img.shields.io/github/issues-pr/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode/pulls)
-[![Contributors](https://img.shields.io/github/contributors/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode/graphs/contributors)
-[![Last Commit](https://img.shields.io/github/last-commit/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode/commits/main)
-[![Repo Size](https://img.shields.io/github/repo-size/vitte-lang/VitteLangVsCode)](https://github.com/vitte-lang/VitteLangVsCode)
 
 ## Marketplace Descriptions
 
@@ -466,7 +417,3 @@ Vitte Studio adds a `vitte` task definition for build tooling:
 ## License
 
 MIT
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
