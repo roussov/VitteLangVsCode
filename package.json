@@ -2,7 +2,7 @@
   "name": "vitte-studio",
   "displayName": "Vitte Language Support",
   "description": "Full tooling for Vitte and Vit: grammar, LSP, debug, tasks, tests, explorer, docs, bench & playground.",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "publisher": "VitteStudio",
   "license": "MIT",
   "repository": {

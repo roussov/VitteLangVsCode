@@ -9,45 +9,48 @@
     { "include": "#keywords" },
     { "include": "#types" },
     { "include": "#attributes" },
-    { "include": "#usepath" }
+    { "include": "#paths" }
   ],
   "repository": {
     "comments": {
       "patterns": [
-        { "name": "comment.line.double-slash.vitte", "match": "//.*$" },
-        { "name": "comment.block.vitte", "begin": "/\\*", "end": "\\*/" },
+        { "name": "comment.line.number-sign.vitte", "begin": "#", "end": "$" },
         { "name": "comment.block.zone.vitte", "begin": "<<<", "end": ">>>" }
       ]
     },
     "strings": {
       "patterns": [
-        { "name": "string.quoted.double.vitte", "begin": "\"", "end": "\"", "patterns": [ { "name": "constant.character.escape.vitte", "match": "\\\\." } ] }
+        { "name": "string.quoted.triple.vitte", "begin": "\"\"\"", "end": "\"\"\"" },
+        { "name": "string.quoted.double.vitte", "begin": "\"", "end": "\"", "patterns": [ { "name": "constant.character.escape.vitte", "match": "\\\\(?:[\"\\\\])" } ] },
+        { "name": "string.quoted.single.vitte", "begin": "'", "end": "'", "patterns": [ { "name": "constant.character.escape.vitte", "match": "\\\\(?:['\\\\])" } ] }
       ]
     },
     "numbers": {
       "patterns": [
-        { "name": "constant.numeric.vitte", "match": "\\b(0x[0-9A-Fa-f]+|0b[01]+|[0-9]+)\\b" }
+        { "name": "constant.numeric.hex.vitte", "match": "\\b-?0x[0-9A-Fa-f_]+\\b" },
+        { "name": "constant.numeric.float.vitte", "match": "\\b-?\\d[\\d_]*\\.\\d[\\d_]*\\b" },
+        { "name": "constant.numeric.integer.vitte", "match": "\\b-?\\d[\\d_]*(?:[A-Za-z]+)?\\b" }
       ]
     },
     "keywords": {
       "patterns": [
-        { "name": "keyword.control.vitte", "match": "\\b(space|pull|use|share|const|let|make|type|form|trait|pick|case|proc|entry|at|macro|give|emit|asm|unsafe|if|else|otherwise|loop|for|in|break|continue|select|when|match|return|not|and|or|is|as)\\b" },
-        { "name": "constant.language.vitte", "match": "\\b(true|false|null)\\b" }
+        { "name": "keyword.control.vitte", "match": "\\b(space|pull|use|share|const|let|make|type|form|trait|pick|case|proc|entry|at|macro|field|give|emit|asm|unsafe|if|else|otherwise|loop|for|in|break|continue|select|when|match|return|not|and|or|is|as|all|set)\\b" },
+        { "name": "constant.language.boolean.vitte", "match": "\\b(true|false)\\b" }
       ]
     },
     "types": {
       "patterns": [
-        { "name": "storage.type.vitte", "match": "\\b(bool|string|int|char|i8|i16|i32|i64|isize|u8|u16|u32|u64|usize|f32|f64)\\b" }
+        { "name": "storage.type.vitte", "match": "\\b(bool|string|int)\\b" }
       ]
     },
     "attributes": {
       "patterns": [
-        { "name": "meta.annotation.vitte", "match": "#\\[[^\\]]+\\]" }
+        { "name": "meta.annotation.vitte", "begin": "#\\[", "end": "\\]" }
       ]
     },
-    "usepath": {
+    "paths": {
       "patterns": [
-        { "name": "constant.other.vitte", "match": "\\buse\\s+([A-Za-z0-9_./]+)" }
+        { "name": "constant.other.vitte", "match": "\\b(?:space|pull|use|entry)\\s+[.]*[A-Za-z_][\\w]*(?:\\s*(?:/|\\.)\\s*[A-Za-z_][\\w]*)*" }
       ]
     }
   }
