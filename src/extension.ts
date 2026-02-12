@@ -8,11 +8,12 @@
 
 import * as path from "node:path";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as vscode from "vscode";
 import { registerDiagnosticsView } from "./diagnosticsView";
 import { registerModuleExplorerView } from "./moduleExplorerView";
-import { VitteProjectTreeProvider } from "./providers/tree/projectTree";
 import { PlaygroundPanel } from "./providers/playgroundPanel";
+import { registerOfflineView } from "./providers/offlineView";
 import { registerBuildTasks } from "./tasks/buildTasks";
 import { registerBenchTasks } from "./tasks/benchTasks";
 import { registerRuntimeLocatorCommand } from "./debug/runtimeLocator";
@@ -21,6 +22,7 @@ import { registerDebugConfigurationProvider } from "./debug/configurationProvide
 import { registerTelemetry } from "./utils/telemetry";
 import { registerQuickActions } from "./commands/quickActions";
 import { registerMetricsView } from "./providers/metricsView";
+import { openSuggestionsPanel, registerSuggestionsView } from "./providers/suggestionsView";
 import {
   LanguageClient,
   TransportKind,
@@ -52,6 +54,16 @@ let statusHealthIcon = "";
 let statusHealthTooltip = "";
 let statusOverrideText: string | undefined;
 let statusOverrideTooltip: string | undefined;
+let offlineReason: string | undefined;
+let offlineBannerShown = false;
+const recentStops: number[] = [];
+const OFFLINE_STATUS_COLOR = new vscode.ThemeColor("statusBarItem.warningForeground");
+const OFFLINE_STATUS_BG = new vscode.ThemeColor("statusBarItem.warningBackground");
+let offlineRetryTimer: NodeJS.Timeout | undefined;
+let offlineRetryMs = 60000;
+let lastActivationContext: vscode.ExtensionContext | undefined;
+let offlineLintCollection: vscode.DiagnosticCollection | undefined;
+let offlineSince: number | undefined;
 
 export interface ExtensionApi {
   getStatusText(): string;
@@ -203,6 +215,13 @@ function applyStatusBar(): void {
     label: text.replace(/\$\([^)]+\)/g, "").trim(),
     role: "status"
   };
+  if (offlineReason) {
+    statusItem.color = OFFLINE_STATUS_COLOR;
+    statusItem.backgroundColor = OFFLINE_STATUS_BG;
+  } else {
+    statusItem.color = undefined;
+    statusItem.backgroundColor = undefined;
+  }
 }
 
 function setStatusBase(icon: string, tooltip: string): void {
@@ -222,6 +241,129 @@ function setStatusOverride(text?: string, tooltip?: string): void {
   statusOverrideText = text;
   statusOverrideTooltip = tooltip;
   applyStatusBar();
+}
+
+function isOfflineEnabled(): boolean {
+  return vscode.workspace.getConfiguration("vitte").get<boolean>("server.offline", false);
+}
+
+function isOfflinePermanent(): boolean {
+  return vscode.workspace.getConfiguration("vitte").get<boolean>("server.offlinePermanent", false);
+}
+
+function isOfflineEffective(): boolean {
+  return isOfflineEnabled() || isOfflinePermanent();
+}
+
+function setOfflineStatus(reason: string): void {
+  offlineReason = reason;
+  offlineSince = offlineSince ?? Date.now();
+  setStatusBase("$(circle-slash)", "Vitte LSP: offline");
+  const forced = isOfflinePermanent() ? "Offline permanent (user-forced)" : "Offline";
+  const since = offlineSince ? ` since ${new Date(offlineSince).toLocaleTimeString()}` : "";
+  setStatusOverride(`$(circle-slash) Vitte ${forced.toUpperCase()}`, `${reason}${since}`);
+  void setServerOnlineContext(false);
+  logOfflineReason(reason);
+  void showOfflineBanner(reason);
+  scheduleOfflineRetry();
+  void vscode.commands.executeCommand("vitte.offline.refresh");
+}
+
+async function setServerOnlineContext(online: boolean): Promise<void> {
+  try { await vscode.commands.executeCommand("setContext", "vitte.serverOnline", online); } catch { /* noop */ }
+  try { await vscode.commands.executeCommand("setContext", "vitte.serverOffline", !online); } catch { /* noop */ }
+}
+
+function logOfflineReason(reason: string): void {
+  try { output.appendLine(`[offline] ${reason}`); } catch { /* noop */ }
+  void appendOfflineLog(reason);
+}
+
+async function showOfflineBanner(reason: string): Promise<void> {
+  if (offlineBannerShown) return;
+  const mute = vscode.workspace.getConfiguration("vitte").get<boolean>("server.offlineMuteBanner", false);
+  if (mute) return;
+  offlineBannerShown = true;
+  const selection = await vscode.window.showWarningMessage(
+    `Vitte server offline: ${reason}`,
+    "Explain Offline",
+    "Open Settings"
+  );
+  if (selection === "Explain Offline") {
+    await vscode.commands.executeCommand("vitte.offline.explain");
+  } else if (selection === "Open Settings") {
+    void vscode.commands.executeCommand("workbench.action.openSettings", "vitte.server");
+  }
+}
+
+async function setOfflineMode(enabled: boolean, reason?: string): Promise<void> {
+  const config = vscode.workspace.getConfiguration("vitte");
+  const hasWorkspace = Boolean(vscode.workspace.workspaceFolders?.length);
+  const target = hasWorkspace ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+  await config.update("server.offline", enabled, target);
+  if (enabled) {
+    setOfflineStatus(reason ?? "Offline mode enabled.");
+  } else {
+    offlineReason = undefined;
+    offlineBannerShown = false;
+    offlineSince = undefined;
+    cancelOfflineRetry();
+    statusItem.color = undefined;
+    statusItem.backgroundColor = undefined;
+    setStatusBase("$(rocket)", "Vitte Language Server");
+    await setServerOnlineContext(true);
+  }
+}
+
+function scheduleOfflineRetry(): void {
+  if (isOfflineEffective()) return;
+  const cfg = vscode.workspace.getConfiguration("vitte");
+  const enabled = cfg.get<boolean>("server.autoRetry", true);
+  if (!enabled) return;
+  const base = clampNumber(cfg.get<number>("server.autoRetryBaseMs", 60000), 10000, 300000, 60000);
+  const max = clampNumber(cfg.get<number>("server.autoRetryMaxMs", 300000), base, 900000, 300000);
+  if (!offlineRetryTimer) {
+    offlineRetryMs = Math.max(base, offlineRetryMs);
+    offlineRetryMs = Math.min(offlineRetryMs, max);
+    offlineRetryTimer = setTimeout(async () => {
+      offlineRetryTimer = undefined;
+      try {
+        const ok = await restartClient(lastActivationContext ?? undefined);
+        if (ok) {
+          offlineRetryMs = base;
+          cancelOfflineRetry();
+          return;
+        }
+        throw new Error("restart failed");
+      } catch {
+        offlineRetryMs = Math.min(offlineRetryMs * 2, max);
+        scheduleOfflineRetry();
+      }
+    }, offlineRetryMs);
+  }
+}
+
+function cancelOfflineRetry(): void {
+  if (offlineRetryTimer) clearTimeout(offlineRetryTimer);
+  offlineRetryTimer = undefined;
+  offlineRetryMs = 60000;
+}
+
+async function appendOfflineLog(reason: string): Promise<void> {
+  try {
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const base = folder ?? os.tmpdir();
+    const dir = path.join(base, ".vitte");
+    await fs.promises.mkdir(dir, { recursive: true });
+    const file = path.join(dir, "offline.log");
+    const line = `${new Date().toISOString()} ${reason}\n`;
+    await fs.promises.appendFile(file, line, "utf8");
+  } catch { /* noop */ }
+}
+
+function clampNumber(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
 }
 
 function refreshDiagnosticsStatus(): void {
@@ -345,6 +487,7 @@ async function showStartupCommandPrompt(context: vscode.ExtensionContext): Promi
   }
 }
 export async function activate(context: vscode.ExtensionContext): Promise<ExtensionApi | undefined> {
+  lastActivationContext = context;
   output = vscode.window.createOutputChannel("Vitte Language Server", { log: true });
   statusItem = vscode.window.createStatusBarItem("vitte.status", vscode.StatusBarAlignment.Right, 100);
   statusItem.name = "Vitte LSP";
@@ -355,8 +498,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   statusItem.show();
   updateCommandButtons(context);
   void showStartupCommandPrompt(context);
+  void setServerOnlineContext(false);
+
+  // Register webview providers early (do not depend on server start)
+  const generatorLog = (message: string) => {
+    output.appendLine(`[generator] ${message}`);
+  };
+  registerSuggestionsView(context, "vitteExplorer", "Vitte Code Generator", generatorLog);
+  registerSuggestionsView(context, "vitteSuggestions", "Vitte Offline Suggestions", generatorLog);
 
   await startClient(context);
+  if (isOfflineEffective()) {
+    void showOfflineBanner(offlineReason ?? (isOfflinePermanent()
+      ? "Offline permanent (user-forced)."
+      : "Offline mode is enabled (vitte.server.offline)."));
+  }
+
+  offlineLintCollection = vscode.languages.createDiagnosticCollection("vitte-offline");
+  context.subscriptions.push(offlineLintCollection);
+  context.subscriptions.push(vscode.workspace.onDidOpenTextDocument((doc) => updateOfflineLint(doc)));
+  context.subscriptions.push(vscode.workspace.onDidChangeTextDocument((e) => updateOfflineLint(e.document)));
+  context.subscriptions.push(vscode.workspace.onDidCloseTextDocument((doc) => offlineLintCollection?.delete(doc.uri)));
+  for (const doc of vscode.workspace.textDocuments) updateOfflineLint(doc);
 
   // Debug & runtime tooling
   registerDebugConfigurationProvider(context);
@@ -367,20 +530,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   registerQuickActions(context);
   await registerTelemetry(context);
 
-  // Sidebar: Explorateur Vitte (activity bar)
-  const vitteTree = new VitteProjectTreeProvider(context);
+  // Sidebar: Vitte generator + docs/playground shortcuts
   context.subscriptions.push(
-    vscode.window.registerTreeDataProvider('vitteExplorer', vitteTree)
-  );
-
-  // Toolbar + palette commands for the view
-  context.subscriptions.push(
-    vscode.commands.registerCommand('vitte.refreshExplorer', () => vitteTree.refresh()),
     vscode.commands.registerCommand('vitte.openDocs', () => {
       const uri = vscode.Uri.file(path.join(context.extensionPath, 'media', 'docs.html'));
       return vscode.commands.executeCommand('vscode.open', uri);
     }),
-    vscode.commands.registerCommand('vitte.openPlayground', () => PlaygroundPanel.createOrShow(context))
+    vscode.commands.registerCommand('vitte.openPlayground', () => PlaygroundPanel.createOrShow(context)),
+    vscode.commands.registerCommand('vitte.openGeneratorPanel', () => openSuggestionsPanel(context, "Vitte Code Generator", generatorLog))
   );
 
   // Commandes
@@ -389,8 +546,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       output.show(true);
     }),
     vscode.commands.registerCommand("vitte.showServerMetrics", async () => {
+      if (isOfflineEffective()) return showOfflineNoop("metrics");
       if (!client) {
-        void vscode.window.showWarningMessage("Vitte server is not running.");
+        const reason = offlineReason ? ` (${offlineReason})` : "";
+        void vscode.window.showWarningMessage(`Vitte server is not running.${reason}`);
         return;
       }
       try {
@@ -405,16 +564,49 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
           const avg = entry.averageMs.toFixed(2);
           const last = entry.lastMs.toFixed(2);
           const max = entry.maxMs.toFixed(2);
+          const p99 = typeof entry.p99Ms === "number" ? entry.p99Ms.toFixed(2) : null;
           const when = entry.lastAt ? new Date(entry.lastAt).toLocaleTimeString() : "n/a";
           const countInfo = typeof entry.lastCount === "number" ? ` n=${entry.lastCount}` : "";
+          const errInfo = entry.errorCount ? ` errors=${entry.errorCount}` : "";
+          const p99Info = p99 ? ` p99=${p99}ms` : "";
+          const lastErr = entry.lastError ? ` lastErr="${entry.lastError}"` : "";
           output.appendLine(
-            `  ${entry.name.padEnd(18)} avg=${avg}ms last=${last}ms max=${max}ms count=${entry.count}${countInfo} last=${when} uri=${entry.lastUri}`
+            `  ${entry.name.padEnd(18)} avg=${avg}ms last=${last}ms max=${max}ms${p99Info} count=${entry.count}${countInfo}${errInfo} last=${when} uri=${entry.lastUri}${lastErr}`
           );
         }
         output.show(true);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         void vscode.window.showErrorMessage(`Vitte: unable to fetch server metrics (${message})`);
+      }
+    }),
+    vscode.commands.registerCommand("vitte.metrics.reset", async () => {
+      if (isOfflineEffective()) return showOfflineNoop("metrics reset");
+      if (!client) {
+        void vscode.window.showWarningMessage("Vitte server is not running.");
+        return;
+      }
+      try {
+        await client.sendRequest("vitte/metrics.reset");
+        void vscode.window.showInformationMessage("Vitte: metrics reset.");
+        void vscode.commands.executeCommand("vitte.metrics.refresh");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        void vscode.window.showErrorMessage(`Vitte: unable to reset metrics (${message})`);
+      }
+    }),
+    vscode.commands.registerCommand("vitte.pingServer", async () => {
+      if (isOfflineEffective()) return showOfflineNoop("ping");
+      if (!client) {
+        void vscode.window.showWarningMessage("Vitte server is not running.");
+        return;
+      }
+      try {
+        const res = await client.sendRequest<{ ok: boolean; ts: number }>("vitte/ping");
+        void vscode.window.showInformationMessage(`Vitte: pong (${res.ok ? "ok" : "fail"}) at ${new Date(res.ts).toLocaleTimeString()}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        void vscode.window.showErrorMessage(`Vitte: ping failed (${message})`);
       }
     }),
     vscode.commands.registerCommand("vitte.showCommandMenu", async () => {
@@ -438,16 +630,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       await vscode.commands.executeCommand(pick.command);
     }),
     vscode.commands.registerCommand("vitte.restartServer", async () => {
+      if (isOfflinePermanent()) {
+        return showOfflineNoop("restart");
+      }
       await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
           title: "Vitte: restarting language server…",
         },
         async () => {
-          await restartClient(context);
+          const ok = await restartClient(context);
+          if (!ok) {
+            showOfflineNoop("restart");
+          }
         }
       );
-      vscode.window.setStatusBarMessage("Vitte server restarted successfully.", 3000);
+      vscode.window.setStatusBarMessage("Vitte server restart attempted.", 3000);
     }),
     vscode.commands.registerCommand("vitte.runAction", async () => {
       const pick = await vscode.window.showQuickPick([
@@ -501,7 +699,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     vscode.commands.registerCommand("vitte.showInfo", async () => {
       const cfg = vscode.workspace.getConfiguration("vitte");
       const trace = cfg.get<string>("trace.server", "off");
-      await vscode.window.showInformationMessage(`Vitte LSP — trace: ${trace}`);
+      const offline = cfg.get<boolean>("server.offline", false);
+      const offlinePermanent = cfg.get<boolean>("server.offlinePermanent", false);
+      const offlineMsg = offlinePermanent ? " (offline permanent)" : (offline ? " (offline)" : "");
+      await vscode.window.showInformationMessage(`Vitte LSP — trace: ${trace}${offlineMsg}`);
+    }),
+    vscode.commands.registerCommand("vitte.offline.explain", async () => {
+      const uri = vscode.Uri.file(path.join(context.extensionPath, "media", "offline.md"));
+      await vscode.commands.executeCommand("vscode.open", uri);
+      void vscode.commands.executeCommand("vitte.offline.openLog");
+    }),
+    vscode.commands.registerCommand("vitte.offline.copyReport", async () => {
+      const report = await readOfflineReport();
+      await vscode.env.clipboard.writeText(report);
+      void vscode.window.showInformationMessage("Vitte: offline report copied to clipboard.");
+    }),
+    vscode.commands.registerCommand("vitte.goOffline", async () => {
+      await setOfflineMode(true, "Manual offline mode enabled.");
+      if (client) {
+        try { await client.stop(); } catch { /* noop */ }
+        client = undefined;
+      }
     }),
     vscode.commands.registerCommand("vitte.debug.runFile", async () => { await runDebugCurrentFile(); }),
     vscode.commands.registerCommand("vitte.debug.attachServer", async () => { await attachDebugServer(); }),
@@ -519,13 +737,40 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     if (e.affectsConfiguration("vitte")) {
       await restartClient(context);
     }
+    if (e.affectsConfiguration("vitte.server.offlinePermanent")) {
+      if (isOfflinePermanent()) {
+        setOfflineStatus("Offline permanent (user-forced).");
+      }
+    }
+    if (e.affectsConfiguration("vitte.lint") || e.affectsConfiguration("vitte.server.offline") || e.affectsConfiguration("vitte.server.offlinePermanent")) {
+      for (const doc of vscode.workspace.textDocuments) updateOfflineLint(doc);
+    }
   }));
 
   // Diagnostics view for both beginners and power users
   registerDiagnosticsView(context);
   registerModuleExplorerView(context);
   registerMetricsView(context, () => client);
+  registerOfflineView(
+    context,
+    () => offlineReason,
+    () => output,
+    () => formatOfflineSince(),
+    () => {
+      const summary = summarizeWorkspaceDiagnostics();
+      const total = summary.errors + summary.warnings + summary.info + summary.hints;
+      if (total === 0) return "No local diagnostics";
+      return `${summary.errors} errors, ${summary.warnings} warnings`;
+    }
+  );
   context.subscriptions.push(vscode.languages.onDidChangeDiagnostics(() => refreshDiagnosticsStatus()));
+
+  if (isOfflineEnabled()) {
+    setOfflineStatus("Offline mode is enabled (vitte.server.offline).");
+  }
+  if (isOfflinePermanent()) {
+    setOfflineStatus("Offline permanent (user-forced).");
+  }
 
   if (process.env.VSCODE_TESTING === "1") {
     const api: ExtensionApi = {
@@ -556,6 +801,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 export async function deactivate(): Promise<void> {
   try { await client?.stop(); } catch { /* noop */ }
   client = undefined;
+  recentStops.length = 0;
+  offlineBannerShown = false;
   for (const watcher of fileWatchers) {
     try { watcher.dispose(); } catch { /* noop */ }
   }
@@ -594,10 +841,27 @@ function resolveServerModule(context: vscode.ExtensionContext): string {
   throw new Error(message);
 }
 
-async function startClient(context: vscode.ExtensionContext): Promise<void> {
-  if (client) return; // already running
+async function startClient(context: vscode.ExtensionContext | undefined): Promise<boolean> {
+  if (client) return true; // already running
+  if (!context) return false;
 
-  const serverModule = resolveServerModule(context);
+  if (isOfflineEffective()) {
+    const reason = isOfflinePermanent()
+      ? "Offline permanent (user-forced)."
+      : "Offline mode is enabled (vitte.server.offline).";
+    setOfflineStatus(reason);
+    return false;
+  }
+
+  let serverModule: string;
+  try {
+    serverModule = resolveServerModule(context);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    setOfflineStatus(msg);
+    void vscode.window.showWarningMessage(`Vitte: server offline — ${msg}`);
+    return false;
+  }
   const debugOptions = { execArgv: ["--nolazy", "--inspect=6009"] };
   const serverOptions: ServerOptions = {
     run:   { module: serverModule, transport: TransportKind.ipc },
@@ -646,25 +910,48 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
   wireClientState(client);
 
   await client.start();
+  return true;
 }
 
-async function restartClient(context: vscode.ExtensionContext): Promise<void> {
+async function restartClient(context: vscode.ExtensionContext | undefined): Promise<boolean> {
   if (client) {
     setStatusBase("$(sync)", "Vitte LSP: restarting…");
     try { await client.stop(); } catch { /* noop */ }
     client = undefined;
   }
-  await startClient(context);
+  if (isOfflineEffective()) {
+    const reason = isOfflinePermanent()
+      ? "Offline permanent (user-forced)."
+      : "Offline mode is enabled (vitte.server.offline).";
+    setOfflineStatus(reason);
+    return false;
+  }
+  return startClient(context);
 }
 
 function wireClientState(c: LanguageClient): void {
   c.onDidChangeState((e: { oldState: ClientState; newState: ClientState }) => {
     if (e.newState === ClientState.Starting) {
       setStatusBase("$(gear)", "Vitte LSP: starting");
+      void setServerOnlineContext(false);
     } else if (e.newState === ClientState.Running) {
+      offlineReason = undefined;
       setStatusBase("$(check)", "Vitte LSP: running");
+      void setServerOnlineContext(true);
     } else if (e.newState === ClientState.Stopped) {
       setStatusBase("$(debug-stop)", "Vitte LSP: stopped");
+      void setServerOnlineContext(false);
+      const now = Date.now();
+      recentStops.push(now);
+      while (recentStops.length) {
+        const first = recentStops[0];
+        if (first === undefined) break;
+        if ((now - first) <= 120000) break;
+        recentStops.shift();
+      }
+      if (!isOfflineEnabled() && recentStops.length >= 3) {
+        setOfflineStatus("Server stopped repeatedly (3x in 2 minutes).");
+      }
     }
   });
 
@@ -711,6 +998,123 @@ async function runBuiltinAction(action: string): Promise<void> {
       void vscode.window.showWarningMessage(`Action inconnue: ${action}`);
       return;
   }
+}
+
+function showOfflineNoop(action: string): void {
+  const reason = offlineReason ?? (isOfflinePermanent()
+    ? "Offline permanent (user-forced)."
+    : "Offline mode is enabled (vitte.server.offline).");
+  void vscode.window.showWarningMessage(`Vitte: ${action} unavailable while offline — ${reason}`);
+}
+
+function formatOfflineSince(): string {
+  if (!offlineSince) return "unknown";
+  const seconds = Math.floor((Date.now() - offlineSince) / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
+}
+
+async function readOfflineReport(): Promise<string> {
+  const cfg = vscode.workspace.getConfiguration("vitte");
+  const report: string[] = [];
+  report.push(`# Vitte Offline Report`);
+  report.push(`- offline: ${isOfflineEffective()}`);
+  report.push(`- offlinePermanent: ${isOfflinePermanent()}`);
+  report.push(`- offlineSince: ${offlineSince ? new Date(offlineSince).toISOString() : "unknown"}`);
+  report.push(`- offlineReason: ${offlineReason ?? "unknown"}`);
+  report.push(`- autoRetry: ${cfg.get<boolean>("server.autoRetry", true)}`);
+  report.push(`- autoRetryBaseMs: ${cfg.get<number>("server.autoRetryBaseMs", 60000)}`);
+  report.push(`- autoRetryMaxMs: ${cfg.get<number>("server.autoRetryMaxMs", 300000)}`);
+  report.push(`- workspaceFolders: ${(vscode.workspace.workspaceFolders ?? []).length}`);
+  report.push(`- openDocs: ${vscode.workspace.textDocuments.length}`);
+  report.push(`- diagnostics (local): ${summarizeWorkspaceDiagnostics().errors} errors, ${summarizeWorkspaceDiagnostics().warnings} warnings`);
+  report.push(`- offlineLog: ${await getOfflineLogPathSafe()}`);
+  const tail = await readOfflineLogTail(30);
+  if (tail) {
+    report.push(`\n## offline.log (last 30 lines)\n${tail}`);
+  }
+  return report.join("\n");
+}
+
+async function getOfflineLogPathSafe(): Promise<string> {
+  try {
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const base = folder ?? os.tmpdir();
+    return path.join(base, ".vitte", "offline.log");
+  } catch {
+    return "unknown";
+  }
+}
+
+async function readOfflineLogTail(lines: number): Promise<string> {
+  try {
+    const filePath = await getOfflineLogPathSafe();
+    const content = await fs.promises.readFile(filePath, "utf8");
+    const rows = content.trim().split(/\r?\n/);
+    return rows.slice(-lines).join("\n");
+  } catch {
+    return "";
+  }
+}
+
+function isVitteDocument(doc: vscode.TextDocument): boolean {
+  return LANGUAGE_SET.has(doc.languageId as typeof LANGUAGES[number]);
+}
+
+function updateOfflineLint(doc: vscode.TextDocument): void {
+  if (!offlineLintCollection) return;
+  if (!isOfflineEffective()) {
+    offlineLintCollection.delete(doc.uri);
+    return;
+  }
+  if (!isVitteDocument(doc)) {
+    offlineLintCollection.delete(doc.uri);
+    return;
+  }
+  const cfg = vscode.workspace.getConfiguration("vitte");
+  const lintCfg = cfg.get<{ maxLineLength?: number; allowTabs?: boolean; allowTrailingWhitespace?: boolean }>("lint") ?? {};
+  const maxLineLength = typeof lintCfg.maxLineLength === "number" ? lintCfg.maxLineLength : 120;
+  const allowTabs = lintCfg.allowTabs === true;
+  const allowTrailing = lintCfg.allowTrailingWhitespace === true;
+
+  const diagnostics: vscode.Diagnostic[] = [];
+  const lines = doc.getText().split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line === undefined) continue;
+    if (!allowTabs && line.includes("\t")) {
+      const idx = line.indexOf("\t");
+      diagnostics.push(new vscode.Diagnostic(
+        new vscode.Range(i, idx, i, idx + 1),
+        "Tabulation détectée. Utiliser des espaces.",
+        vscode.DiagnosticSeverity.Warning
+      ));
+    }
+    if (!allowTrailing) {
+      const m = /[ \t]+$/.exec(line);
+      if (m) {
+        const start = m.index ?? Math.max(0, line.length - m[0].length);
+        diagnostics.push(new vscode.Diagnostic(
+          new vscode.Range(i, start, i, line.length),
+          "Espaces en fin de ligne.",
+          vscode.DiagnosticSeverity.Hint
+        ));
+      }
+    }
+    if (maxLineLength > 0 && line.length > maxLineLength) {
+      diagnostics.push(new vscode.Diagnostic(
+        new vscode.Range(i, maxLineLength, i, line.length),
+        `Ligne trop longue (${line.length} > ${maxLineLength}).`,
+        vscode.DiagnosticSeverity.Information
+      ));
+    }
+  }
+  offlineLintCollection.set(doc.uri, diagnostics);
 }
 
 function sleep(ms: number): Promise<void> { return new Promise(res => setTimeout(res, ms)); }

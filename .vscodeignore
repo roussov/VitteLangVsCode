@@ -1,0 +1,16 @@
+**/.git/**
+**/.vscode/**
+**/node_modules/**
+**/test/**
+**/tests/**
+**/docs/**
+**/colorize-fixtures/**
+**/client/**
+**/src/**
+**/server/src/**
+**/*.map
+**/*.ts
+**/*.tsx
+**/*.d.ts
+**/*.log
+**/*.vsix

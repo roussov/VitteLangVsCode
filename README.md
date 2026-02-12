@@ -47,6 +47,10 @@ Vitte Studio brings first‑class Vitte support to VS Code. You get rich complet
 - Debugger integration
 - Tasks and quick actions for build/run/test/bench
 
+## Changelog
+
+See `CHANGELOG.md` for full release notes.
+
 ## Supported Languages
 
 - `vitte` (`.vitte`)
