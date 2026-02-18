@@ -498,7 +498,7 @@ export function exportIndexSnapshot(): IndexSnapshot {
 }
 
 export function loadIndexSnapshot(snapshot: IndexSnapshot | null | undefined): number {
-  if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.entries)) return 0;
+  if (!snapshot?.entries || snapshot.version !== 1 || !Array.isArray(snapshot.entries)) return 0;
   INDEX.clear();
   let count = 0;
   for (const entry of snapshot.entries) {

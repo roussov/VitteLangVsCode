@@ -138,7 +138,7 @@ const BUILTIN_ACTION_DEFS: QuickActionDefinition[] = [
   {
     id: 'docs',
     label: '📚 Docs',
-    description: 'Open the bundled docs/playground portal',
+    description: 'Open the online docs on vitte.netlify.app',
     command: 'vitte.openDocs',
   },
   {

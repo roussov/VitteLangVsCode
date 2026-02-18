@@ -56,7 +56,7 @@ import { provideFormattingEdits } from "./formatting.js";
 import { getSemanticTokensLegend, buildSemanticTokens, provideHover } from "./semantic.js";
 import { lintToPublishable } from "./lint.js";
 import { registerCommands } from "./commands.js";
-import { indexDocument as indexWorkspaceDocument, removeDocument as removeWorkspaceDocument, clearIndex, exportIndexSnapshot, loadIndexSnapshot } from "./indexer.js";
+import { indexDocument as indexWorkspaceDocument, removeDocument as removeWorkspaceDocument, clearIndex, exportIndexSnapshot, loadIndexSnapshot, type IndexSnapshot } from "./indexer.js";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -299,14 +299,21 @@ async function getIndexCachePath(): Promise<string | undefined> {
   return path.join(root, ".vitte", "index-cache.json");
 }
 
+function isIndexSnapshot(value: unknown): value is IndexSnapshot {
+  if (!value || typeof value !== "object") return false;
+  const v = value as { version?: unknown; entries?: unknown };
+  return v.version === 1 && Array.isArray(v.entries);
+}
+
 async function loadIndexCache(): Promise<void> {
   if (!globalSettings.indexerCacheEnabled) return;
   const cachePath = await getIndexCachePath();
   if (!cachePath) return;
   try {
     const raw = await fs.readFile(cachePath, "utf8");
-    const parsed = JSON.parse(raw);
-    const count = loadIndexSnapshot(parsed);
+    const parsed = JSON.parse(raw) as unknown;
+    const snapshot: IndexSnapshot | null = isIndexSnapshot(parsed) ? parsed : null;
+    const count = loadIndexSnapshot(snapshot);
     connection.console.log(`[index] loaded cache (${count} files)`);
   } catch {
     // ignore cache errors
@@ -331,7 +338,7 @@ async function saveIndexCache(): Promise<void> {
 const breaker = { consecutiveErrors: 0, until: 0 };
 const BREAKER_THRESHOLD = 5;
 const BREAKER_COOLDOWN_MS = 30000;
-const requestQueue: Array<() => void> = [];
+const requestQueue: (() => void)[] = [];
 let activeRequests = 0;
 
 function isBreakerActive(): boolean {
@@ -644,7 +651,7 @@ const lintQueue: string[] = [];
 const lintQueued = new Set<string>();
 let lintWorkerRunning = false;
 
-async function runLint(doc: TextDocument): Promise<void> {
+function runLint(doc: TextDocument): void {
   const t0 = now();
   try {
     if (!featureEnabled("lint")) return;
@@ -685,7 +692,7 @@ function enqueueLint(uri: string): void {
   void processLintQueue();
 }
 
-async function processLintQueue(): Promise<void> {
+function processLintQueue(): void {
   if (lintWorkerRunning) return;
   lintWorkerRunning = true;
   try {
@@ -694,7 +701,7 @@ async function processLintQueue(): Promise<void> {
       lintQueued.delete(uri);
       const doc = documents.get(uri);
       if (!doc) continue;
-      await runLint(doc);
+      runLint(doc);
     }
   } finally {
     lintWorkerRunning = false;
@@ -753,7 +760,7 @@ function recordMetric(what: string, elapsed: number, uri: string, n?: number, er
   entry.lastCount = typeof n === "number" ? n : undefined;
   if (err) {
     entry.errorCount += 1;
-    entry.lastError = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    entry.lastError = formatError(err);
   }
   entry.samples.push(elapsed);
   if (entry.samples.length > 1000) entry.samples.shift();
@@ -771,8 +778,18 @@ function recordMetric(what: string, elapsed: number, uri: string, n?: number, er
 const errorRateLimit = new Map<string, number>();
 const ERROR_LOG_INTERVAL_MS = 2000;
 
+function formatError(err: unknown): string {
+  if (err instanceof Error) return `${err.name}: ${err.message}`;
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return "[unknown error]";
+  }
+}
+
 function logErr(ctx: string, err: unknown) {
-  const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  const msg = formatError(err);
   const nowTs = Date.now();
   const last = errorRateLimit.get(ctx) ?? 0;
   if (nowTs - last < ERROR_LOG_INTERVAL_MS) return;

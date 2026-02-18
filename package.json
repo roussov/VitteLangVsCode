@@ -2,7 +2,7 @@
   "name": "vitte-studio",
   "displayName": "Vitte Language Support",
   "description": "Full tooling for Vitte and Vit: grammar, LSP, debug, tasks, tests, explorer, docs, bench & playground.",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "publisher": "VitteStudio",
   "license": "MIT",
   "repository": {
@@ -39,14 +39,7 @@
     "LICENSE"
   ],
   "activationEvents": [
-    "onView:vitteExplorer",
-    "onView:vitteSuggestions",
-    "onView:vitteDiagnostics",
-    "onView:vitteModules",
-    "onView:vitteMetrics",
-    "onView:vitteOffline",
-    "onLanguage:vitte",
-    "onLanguage:vit"
+    "onStartupFinished"
   ],
   "contributes": {
     "languages": [
@@ -74,12 +67,12 @@
     "grammars": [
       {
         "language": "vitte",
-        "scopeName": "source.vitte",
+        "scopeName": "source.ts.vitte",
         "path": "./syntaxes/vitte.tmLanguage.json"
       },
       {
         "language": "vit",
-        "scopeName": "source.vitte",
+        "scopeName": "source.ts.vitte",
         "path": "./syntaxes/vitte.tmLanguage.json"
       }
     ],
@@ -106,15 +99,14 @@
       "vitte-sidebar": [
         {
           "id": "vitteExplorer",
-          "name": "Vitte Code Generator",
+          "name": "Vitte Documentation",
           "icon": "media/icons/vitte-logo.svg",
           "type": "webview"
         },
         {
           "id": "vitteSuggestions",
-          "name": "Vitte Suggestions",
-          "icon": "media/icons/vitte-logo.svg",
-          "type": "webview"
+          "name": "Vitte Sommaire",
+          "icon": "media/icons/vitte-logo.svg"
         },
         {
           "id": "vitteDiagnostics",
@@ -145,16 +137,14 @@
     "viewsWelcome": [
       {
         "view": "vitteExplorer",
-        "contents": "# Vitte Code Generator (Offline)\n\nDescribe what you want, generate Vitte code, then insert or copy.",
+        "contents": "# Vitte Documentation\n\nThis panel loads documentation directly from [vitte.netlify.app](https://vitte.netlify.app).\n\nUpdates published on the website are visible automatically.",
         "when": "view == vitteExplorer"
-      }
-      ,
+      },
       {
         "view": "vitteSuggestions",
-        "contents": "# Vitte Suggestions (Offline)\n\nDescribe what you want, generate Vitte code, then insert or copy.\n",
+        "contents": "# Vitte Sommaire\n\nBrowse chapters from beginner to professional in this sidebar tree.\n\nClick any chapter to open it on [vitte.netlify.app](https://vitte.netlify.app).",
         "when": "view == vitteSuggestions"
-      }
-      ,
+      },
       {
         "view": "vitteOffline",
         "contents": "# Vitte Offline\n\nThe language server is offline.\n\n- $(question) **Explain Offline** → `vscode:command:vitte.offline.explain`\n- $(settings-gear) **Settings** → `vscode:command:workbench.action.openSettings?%5B%22vitte.server%22%5D`\n",
@@ -308,8 +298,18 @@
         "category": "Vitte"
       },
       {
-        "command": "vitte.openGeneratorPanel",
-        "title": "Vitte: Open Code Generator",
+        "command": "vitte.docs.openChapter",
+        "title": "Vitte: Open Documentation Chapter",
+        "category": "Vitte"
+      },
+      {
+        "command": "vitte.docs.refreshChapters",
+        "title": "Vitte: Refresh Documentation Chapters",
+        "category": "Vitte"
+      },
+      {
+        "command": "vitte.debugActivationStatus",
+        "title": "Vitte: Debug Activation Status",
         "category": "Vitte"
       },
       {
@@ -453,6 +453,11 @@
           "group": "navigation@1"
         },
         {
+          "command": "vitte.docs.refreshChapters",
+          "when": "view == vitteSuggestions",
+          "group": "navigation@1"
+        },
+        {
           "command": "vitte.offline.refresh",
           "when": "view == vitteOffline",
           "group": "navigation@1"
@@ -466,9 +471,6 @@
         {
           "command": "vitte.openPlayground",
           "when": "workspaceFolderCount > 0"
-        },
-        {
-          "command": "vitte.openGeneratorPanel"
         },
         {
           "command": "vitte.detectToolchain",
@@ -545,8 +547,7 @@
         },
         {
           "command": "vitte.goOffline"
-        }
-        ,
+        },
         {
           "command": "vitte.offline.openLog"
         },
@@ -564,7 +565,7 @@
           {
             "id": "vitte.quickstart.docs",
             "title": "Explore the docs & playground",
-            "description": "Run [Vitte: Quick Actions](command:vitte.quickActions) and pick **Docs + Playground** to browse the bundled documentation.",
+            "description": "Run [Vitte: Quick Actions](command:vitte.quickActions) and pick **Docs + Playground** to open the online docs on vitte.netlify.app.",
             "media": {
               "image": "media/icons/vitte-logo.svg",
               "altText": "Vitte"
@@ -888,23 +889,6 @@
           "default": ".vitte/bench",
           "description": "Directory that stores benchmark reports."
         },
-        "vitte.docs.include": {
-          "type": "string",
-          "default": "**/*.md",
-          "description": "Include glob for the local docs index."
-        },
-        "vitte.docs.exclude": {
-          "type": "string",
-          "default": "**/{node_modules,.git,dist,out,target,build}/**",
-          "description": "Exclude glob for the local docs index."
-        },
-        "vitte.docs.indexLimit": {
-          "type": "number",
-          "default": 2000,
-          "minimum": 100,
-          "maximum": 10000,
-          "description": "Maximum number of .md files to index."
-        },
         "vitte.lint.maxLineLength": {
           "type": "number",
           "default": 120,
@@ -1104,59 +1088,10 @@
                 "type": "boolean",
                 "description": "Include this shortcut in the startup toast.",
                 "default": true
+              }
+            }
+          }
         }
-        ,
-        "vitte.ai.enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable local AI code generation for Vitte (offline only)."
-        },
-        "vitte.ai.provider": {
-          "type": "string",
-          "enum": [
-            "ollama",
-            "llamacpp"
-          ],
-          "default": "ollama",
-          "description": "Local AI provider."
-        },
-        "vitte.ai.model": {
-          "type": "string",
-          "default": "qwen2.5-coder:0.5b",
-          "description": "Model name for the local AI provider."
-        },
-        "vitte.ai.endpoint": {
-          "type": "string",
-          "default": "http://localhost:11434",
-          "description": "Base URL for the local AI server. Example: http://localhost:11434 (Ollama) or http://localhost:8080 (llama.cpp)."
-        },
-        "vitte.ai.maxTokens": {
-          "type": "number",
-          "default": 256,
-          "minimum": 32,
-          "maximum": 2048,
-          "description": "Max tokens to generate for local AI."
-        },
-        "vitte.ai.temperature": {
-          "type": "number",
-          "default": 0.2,
-          "minimum": 0,
-          "maximum": 2,
-          "description": "Sampling temperature for local AI."
-        },
-        "vitte.ai.systemPrompt": {
-          "type": "string",
-          "default": "You are a Vitte code generator. Output only valid Vitte code, no explanations, no markdown.",
-          "description": "System prompt for local AI (Vitte only)."
-        },
-        "vitte.ai.strictVitteOnly": {
-          "type": "boolean",
-          "default": true,
-          "description": "Post-process AI output to keep Vitte code only (strip markdown/explanations)."
-        }
-      }
-    }
-  }
       }
     }
   },
@@ -1170,7 +1105,7 @@
     "lint": "eslint .",
     "package": "vsce package",
     "vsix": "vsce package -o vitte-studio.vsix",
-    "vsix:verify": "vsce verify vitte-studio.vsix",
+    "vsix:verify": "npx @vscode/vsce@3.7.1 ls",
     "publish": "vsce publish",
     "prepack": "npm run build",
     "vscode:prepublish": "npm run build",

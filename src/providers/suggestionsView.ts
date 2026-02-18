@@ -3,255 +3,262 @@ import * as vscode from "vscode";
 type Logger = (message: string) => void;
 
 interface SuggestionState {
-  prompt: string;
-  output: string;
-  history: Array<{ title: string; output: string; ts: number }>;
-  aiStatus: string;
+  cInput: string;
+  outputVitte: string;
+  history: { title: string; output: string; ts: number }[];
+  cFlavor: "c" | "cpp";
 }
 
-interface AiConfig {
-  enabled: boolean;
-  provider: "ollama" | "llamacpp";
-  model: string;
-  endpoint: string;
-  maxTokens: number;
-  temperature: number;
-  systemPrompt: string;
-  strictVitteOnly: boolean;
-}
-
-function sanitize(input: string): string {
-  return input.replace(/[<>]/g, "");
-}
-
-function buildSuggestion(promptRaw: string): string {
-  const prompt = promptRaw.toLowerCase();
-  const templates: Array<{ when: (p: string) => boolean; code: string }> = [
-    {
-      when: (p) => p.includes("http") || p.includes("rest") || p.includes("request") || p.includes("fetch"),
-      code: `proc http_get(url: string) -> string {\n  // TODO: implement HTTP client binding\n  return ""\n}\n\nproc fetch_user(user_id: int) -> string {\n  const url = "https://api.example.com/users/" + user_id as string\n  return http_get(url)\n}`
-    },
-    {
-      when: (p) => p.includes("json") || p.includes("parse"),
-      code: `form User {\n  id: int,\n  name: string\n}\n\nproc parse_user(json: string) -> User {\n  // TODO: implement JSON parsing -> User\n  return User { id: 0, name: "" }\n}`
-    },
-    {
-      when: (p) => p.includes("file") || p.includes("read") || p.includes("write"),
-      code: `proc read_file(path: string) -> string {\n  // TODO: implement file read binding\n  return ""\n}\n\nproc write_file(path: string, contents: string) {\n  // TODO: implement file write binding\n}`
-    },
-    {
-      when: (p) => p.includes("cli") || p.includes("args") || p.includes("argument"),
-      code: `proc parse_args(args: [string]) -> [string] {\n  // TODO: parse CLI args\n  return args\n}\n\nproc main() {\n  // TODO: read argv from runtime\n  let args: [string] = []\n  let parsed = parse_args(args)\n  emit parsed\n}`
-    },
-    {
-      when: (p) => p.includes("list") || p.includes("array") || p.includes("map"),
-      code: `proc build_index(keys: [string], values: [int]) -> [int] {\n  // TODO: build a lookup table (parallel arrays)\n  return values\n}\n\nproc find_in_list(values: [int], needle: int) -> int {\n  for v in values {\n    if v == needle { return v }\n  }\n  return -1\n}`
-    },
-    {
-      when: (p) => p.includes("sort") || p.includes("search") || p.includes("algo"),
-      code: `proc bubble_sort(values: [int]) -> [int] {\n  let n: int = 0\n  // TODO: compute n from values length\n  loop {\n    // TODO: implement sort\n    break\n  }\n  return values\n}\n\nproc binary_search(values: [int], target: int) -> int {\n  // TODO: implement binary search\n  return -1\n}`
-    },
-    {
-      when: (p) => p.includes("test") || p.includes("assert"),
-      code: `proc test_sum() {\n  let values: [int] = [1, 2, 3]\n  let total = sum_list(values)\n  assert(total == 6)\n}\n\nproc sum_list(values: [int]) -> int {\n  let total: int = 0\n  for v in values { set total = total + v }\n  return total\n}`
-    },
-    {
-      when: (p) => p.includes("async") || p.includes("concurrency") || p.includes("parallel"),
-      code: `proc spawn_job(name: string) {\n  // TODO: spawn async job\n}\n\nproc main() {\n  spawn_job("job-a")\n  spawn_job("job-b")\n}`
-    },
-    {
-      when: (p) => p.includes("struct") || p.includes("form"),
-      code: `form User {\n  id: int,\n  name: string\n}\n\nproc main() {\n  let user = User { id: 1, name: "Alice" }\n  emit user\n}`
-    }
-  ];
-
-  for (const entry of templates) {
-    if (entry.when(prompt)) return entry.code;
-  }
-
-  return `proc main() {\n  // TODO: implement ${sanitize(promptRaw) || "logic"}\n}`;
-}
-
-function getAiConfig(): AiConfig {
-  const cfg = vscode.workspace.getConfiguration("vitte.ai");
-  const enabled = cfg.get<boolean>("enabled", false);
-  const provider = cfg.get<"ollama" | "llamacpp">("provider", "ollama");
-  const model = cfg.get<string>("model", "qwen2.5-coder:0.5b");
-  const endpoint = cfg.get<string>("endpoint", provider === "ollama" ? "http://localhost:11434" : "http://localhost:8080");
-  const maxTokens = cfg.get<number>("maxTokens", 256);
-  const temperature = cfg.get<number>("temperature", 0.2);
-  const systemPrompt = cfg.get<string>(
-    "systemPrompt",
-    "You are a Vitte code generator. Output only valid Vitte code, no explanations, no markdown."
-  );
-  const strictVitteOnly = cfg.get<boolean>("strictVitteOnly", true);
-  return { enabled, provider, model, endpoint, maxTokens, temperature, systemPrompt, strictVitteOnly };
-}
-
-async function callOllama(cfg: AiConfig, prompt: string): Promise<string> {
-  const res = await fetch(`${cfg.endpoint.replace(/\/$/, "")}/api/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: cfg.model,
-      prompt,
-      system: cfg.systemPrompt,
-      stream: false,
-      options: {
-        temperature: cfg.temperature,
-        num_predict: cfg.maxTokens
-      }
-    })
-  });
-  if (!res.ok) {
-    throw new Error(`Ollama error: ${res.status} ${res.statusText}`);
-  }
-  const data = (await res.json()) as { response?: string };
-  return data.response?.trim() ?? "";
-}
-
-async function callLlamaCpp(cfg: AiConfig, prompt: string): Promise<string> {
-  const base = cfg.endpoint.replace(/\/$/, "");
-  const res = await fetch(`${base}/v1/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: cfg.model,
-      messages: [
-        { role: "system", content: cfg.systemPrompt },
-        { role: "user", content: prompt }
-      ],
-      temperature: cfg.temperature,
-      max_tokens: cfg.maxTokens
-    })
-  });
-  if (!res.ok) {
-    throw new Error(`llama.cpp error: ${res.status} ${res.statusText}`);
-  }
-  const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-  return data.choices?.[0]?.message?.content?.trim() ?? "";
-}
-
-async function generateWithLocalAi(prompt: string, log?: Logger): Promise<string> {
-  const cfg = getAiConfig();
-  if (!cfg.enabled) {
-    return "// Local AI disabled. Enable vitte.ai.enabled in Settings.";
-  }
-  log?.(`AI provider=${cfg.provider} model=${cfg.model}`);
-  if (cfg.provider === "ollama") {
-    const raw = await callOllama(cfg, prompt);
-    return cfg.strictVitteOnly ? sanitizeVitteOnly(raw) : raw;
-  }
-  const raw = await callLlamaCpp(cfg, prompt);
-  return cfg.strictVitteOnly ? sanitizeVitteOnly(raw) : raw;
-}
-
-function sanitizeVitteOnly(raw: string): string {
-  const cleaned = raw
-    .replace(/```[\s\S]*?```/g, (block) => {
-      return block.replace(/```[a-zA-Z]*\n?/g, "").replace(/```/g, "");
-    })
-    .replace(/```/g, "")
+function mapCTypeToVitte(typeRaw: string): string {
+  const cleaned = typeRaw
+    .replace(/\bconst\b/g, "")
+    .replace(/\bunsigned\b/g, "")
+    .replace(/\bsigned\b/g, "")
+    .replace(/\bstd::/g, "")
     .trim();
-
-  const lines = cleaned.split(/\r?\n/);
-  const vitteStarts = ["space", "use", "pull", "share", "type", "form", "trait", "pick", "proc", "macro", "entry", "const", "let", "make"];
-  let startIndex = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const line = (lines[i] ?? "").trim();
-    if (!line) continue;
-    if (vitteStarts.some((k) => line.startsWith(k))) {
-      startIndex = i;
-      break;
-    }
-  }
-  const sliced = lines.slice(startIndex).join("\n").trim();
-  return sliced || cleaned;
+  if (!cleaned) return "int";
+  if (cleaned.includes("string")) return "string";
+  if (cleaned.includes("bool")) return "bool";
+  if (cleaned.includes("char*") || cleaned.includes("char *")) return "string";
+  if (cleaned.includes("char")) return "int";
+  if (/\b(short|int|long|size_t|ssize_t)\b/.exec(cleaned)) return "int";
+  const vectorMatch = /vector<\s*([^>]+)\s*>/.exec(cleaned);
+  if (vectorMatch) return `[${mapCTypeToVitte(vectorMatch[1] ?? "int")}]`;
+  if (cleaned.includes("*")) return `*${mapCTypeToVitte(cleaned.replace(/\*/g, "").trim())}`;
+  return cleaned;
 }
 
-function createGeneratorSession(webview: vscode.Webview, title: string, log?: Logger): void {
+function parseCParams(paramList: string): string {
+  const params = paramList.trim();
+  if (!params || params === "void") return "";
+  return params
+    .split(",")
+    .map((chunk) => {
+      const part = chunk.trim();
+      if (!part) return "";
+      const tokens = part.split(/\s+/);
+      let name = tokens.pop() ?? "arg";
+      let type = tokens.join(" ");
+      if (name.includes("*")) {
+        type = `${type} ${name.replace(/[A-Za-z_]\w*/, "")}`.trim();
+        name = name.replace(/[^A-Za-z_0-9]/g, "");
+      }
+      return `${name}: ${mapCTypeToVitte(type)}`;
+    })
+    .filter(Boolean)
+    .join(", ");
+}
+
+function convertCSignature(line: string): string | null {
+  const match = /^\s*([A-Za-z_][\w:<>,\s\*&]+)\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{?/.exec(line);
+  if (!match) return null;
+  const ret = mapCTypeToVitte(match[1] ?? "");
+  const name = match[2] ?? "proc";
+  const params = parseCParams(match[3] ?? "");
+  return ret === "void" ? `proc ${name}(${params}) {` : `proc ${name}(${params}) -> ${ret} {`;
+}
+
+function convertCStruct(line: string): string | null {
+  const match = /^\s*struct\s+([A-Za-z_]\w*)\s*\{/.exec(line);
+  if (!match) return null;
+  return `form ${match[1] ?? "Struct"} {`;
+}
+
+function convertCField(line: string): string | null {
+  const match = /^\s*([A-Za-z_][\w:<>,\s\*&]+)\s+([A-Za-z_]\w*)\s*(\[[^\]]+\])?\s*;/.exec(line);
+  if (!match) return null;
+  const type = mapCTypeToVitte(match[1] ?? "");
+  const name = match[2] ?? "field";
+  return `  ${name}: ${type},`;
+}
+
+function convertCVar(line: string): string | null {
+  const match = /^\s*(const\s+)?([A-Za-z_][\w:<>,\s\*&]+)\s+([A-Za-z_]\w*)\s*(=\s*(.+))?;/.exec(line);
+  if (!match) return null;
+  const isConst = Boolean(match[1]);
+  const type = mapCTypeToVitte(match[2] ?? "");
+  const name = match[3] ?? "var";
+  const value = (match[5] ?? "").trim();
+  const head = isConst ? "const" : "let";
+  if (value) return `${head} ${name}: ${type} = ${value}`;
+  return `${head} ${name}: ${type} = ${type === "string" ? "\"\"" : "0"}`;
+}
+
+function convertCIf(line: string): string | null {
+  const match = /^\s*if\s*\((.+)\)\s*\{/.exec(line);
+  if (!match) return null;
+  return `if ${match[1] ?? ""} {`;
+}
+
+function convertCElse(line: string): string | null {
+  if (/^\s*else\s*\{/.test(line)) return "else {";
+  return null;
+}
+
+function convertCWhile(line: string): string | null {
+  const match = /^\s*while\s*\((.+)\)\s*\{/.exec(line);
+  if (!match) return null;
+  return `loop { // while ${match[1] ?? ""}`;
+}
+
+function convertCFor(line: string): string | null {
+  if (!/^\s*for\s*\(/.test(line)) return null;
+  return "loop { // for (...)";
+}
+
+function convertCReturn(line: string): string | null {
+  const match = /^\s*return\s+(.+)\s*;/.exec(line);
+  if (!match) return null;
+  return `return ${match[1] ?? ""}`;
+}
+
+function convertCStatements(line: string): string {
+  return line
+    .replace(/\btrue\b/g, "true")
+    .replace(/\bfalse\b/g, "false")
+    .replace(/\bprintf\s*\(/g, "emit ");
+}
+
+function convertCToVitte(input: string): string {
+  const lines = input.split(/\r?\n/);
+  const out: string[] = [];
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (!line) {
+      out.push("");
+      continue;
+    }
+    const sig = convertCSignature(line);
+    if (sig) {
+      out.push(sig);
+      continue;
+    }
+    const form = convertCStruct(line);
+    if (form) {
+      out.push(form);
+      continue;
+    }
+    if (line.startsWith("}")) {
+      out.push("}");
+      continue;
+    }
+    const field = convertCField(line);
+    if (field) {
+      out.push(field);
+      continue;
+    }
+    const ifLine = convertCIf(line);
+    if (ifLine) {
+      out.push(ifLine);
+      continue;
+    }
+    const elseLine = convertCElse(line);
+    if (elseLine) {
+      out.push(elseLine);
+      continue;
+    }
+    const whileLine = convertCWhile(line);
+    if (whileLine) {
+      out.push(whileLine);
+      continue;
+    }
+    const forLine = convertCFor(line);
+    if (forLine) {
+      out.push(forLine);
+      continue;
+    }
+    const retLine = convertCReturn(line);
+    if (retLine) {
+      out.push(retLine);
+      continue;
+    }
+    const decl = convertCVar(line);
+    if (decl) {
+      out.push(decl);
+      continue;
+    }
+    out.push(convertCStatements(line));
+  }
+  return out.join("\n");
+}
+
+function createConverterSession(webview: vscode.Webview, title: string, log?: Logger): void {
   webview.options = { enableScripts: true };
   const state: SuggestionState = {
-    prompt: "",
-    output: "",
+    cInput: "",
+    outputVitte: "",
     history: [],
-    aiStatus: ""
+    cFlavor: "cpp"
   };
   const update = () => {
-    webview.html = getHtml(state, title);
+    try {
+      webview.html = getHtml(state, title);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log?.(`Webview render error: ${message}`);
+      webview.html = `<!doctype html><html><body><pre>Vitte converter failed to render: ${message}</pre></body></html>`;
+    }
   };
+  webview.html = `<!doctype html><html><body><p>Loading Vitte converter…</p></body></html>`;
   update();
-  log?.("Webview session initialized.");
+  log?.("Converter session initialized.");
 
   webview.onDidReceiveMessage(async (msg) => {
-    if (msg?.type === "generate") {
-      state.prompt = String(msg.prompt ?? "");
-      state.output = buildSuggestion(state.prompt);
-      if (state.output.trim().length > 0) {
-        state.history.unshift({ title: `Template: ${state.prompt || "prompt"}`, output: state.output, ts: Date.now() });
-        state.history = state.history.slice(0, 12);
-      }
+    const data = asRecord(msg);
+    if (!data) return;
+    const type = typeof data.type === "string" ? data.type : "";
+    if (type === "convertFromC") {
+      const input = typeof data.input === "string" ? data.input : "";
+      const flavor = data.flavor === "c" ? "c" : "cpp";
+      state.cInput = input;
+      state.cFlavor = flavor;
+      state.outputVitte = convertCToVitte(state.cInput);
+      state.history.unshift({ title: "Convert: C/C++ -> Vitte", output: state.outputVitte, ts: Date.now() });
+      state.history = state.history.slice(0, 12);
       update();
       return;
     }
-    if (msg?.type === "aiGenerate") {
-      state.prompt = String(msg.prompt ?? "");
-      state.aiStatus = "Generating…";
-      update();
-      try {
-        const result = await generateWithLocalAi(state.prompt, log);
-        state.output = result || "// Empty response from local AI.";
-        state.history.unshift({ title: `AI: ${state.prompt || "prompt"}`, output: state.output, ts: Date.now() });
-        state.history = state.history.slice(0, 12);
-        state.aiStatus = "";
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        state.aiStatus = `Error: ${message}`;
-        state.output = `// ${message}`;
-      }
-      update();
-      return;
-    }
-    if (msg?.type === "insert") {
+    if (type === "insert") {
       const editor = vscode.window.activeTextEditor;
       if (!editor) {
         void vscode.window.showWarningMessage("Open a Vitte/Vit file to insert code.");
         return;
       }
       await editor.edit((edit) => {
-        edit.insert(editor.selection.active, state.output + "\n");
+        edit.insert(editor.selection.active, state.outputVitte + "\n");
       });
       return;
     }
-    if (msg?.type === "copy") {
-      await vscode.env.clipboard.writeText(state.output);
-      void vscode.window.showInformationMessage("Vitte suggestion copied.");
+    if (type === "copy") {
+      await vscode.env.clipboard.writeText(state.outputVitte);
+      void vscode.window.showInformationMessage("Vitte code copied.");
       return;
     }
-    if (msg?.type === "clear") {
-      state.prompt = "";
-      state.output = "";
+    if (type === "clear") {
+      state.cInput = "";
+      state.outputVitte = "";
       state.history = [];
-      state.aiStatus = "";
       update();
       return;
     }
-    if (msg?.type === "openSettings") {
-      await vscode.commands.executeCommand("workbench.action.openSettings", "vitte.ai");
-    }
   });
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object") return null;
+  return value as Record<string, unknown>;
 }
 
 export function registerSuggestionsView(
   context: vscode.ExtensionContext,
   viewId = "vitteSuggestions",
-  title = "Vitte Offline Suggestions",
+  title = "Vitte C/C++ Converter",
   log?: Logger
 ): void {
   const provider = {
     resolveWebviewView(view: vscode.WebviewView) {
       log?.(`Resolve view: ${viewId}`);
-      createGeneratorSession(view.webview, title, log);
+      createConverterSession(view.webview, title, log);
     },
   } satisfies vscode.WebviewViewProvider;
 
@@ -262,7 +269,7 @@ export function registerSuggestionsView(
 
 export function openSuggestionsPanel(
   context: vscode.ExtensionContext,
-  title = "Vitte Code Generator",
+  title = "Vitte C/C++ Converter",
   log?: Logger
 ): void {
   const panel = vscode.window.createWebviewPanel(
@@ -271,15 +278,14 @@ export function openSuggestionsPanel(
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true }
   );
-  log?.("Open generator panel.");
-  createGeneratorSession(panel.webview, title, log);
+  log?.("Open converter panel.");
+  createConverterSession(panel.webview, title, log);
   context.subscriptions.push(panel);
 }
 
 function getHtml(state: SuggestionState, title: string): string {
-  const prompt = escapeHtml(state.prompt);
-  const output = escapeHtml(state.output);
-  const status = escapeHtml(state.aiStatus);
+  const cInput = escapeHtml(state.cInput);
+  const outputVitte = escapeHtml(state.outputVitte);
   const history = state.history
     .map((entry) => {
       const when = new Date(entry.ts).toLocaleTimeString();
@@ -297,50 +303,35 @@ function getHtml(state: SuggestionState, title: string): string {
   :root { color-scheme: light dark; }
   body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; padding: 12px; }
   h3 { margin: 0 0 8px; }
-  textarea, input { width: 100%; box-sizing: border-box; }
-  textarea { min-height: 120px; }
+  textarea { width: 100%; box-sizing: border-box; min-height: 160px; }
   .row { display: flex; gap: 8px; margin-top: 8px; }
   button { flex: 1; padding: 6px 10px; }
   pre { white-space: pre-wrap; background: rgba(127,127,127,0.15); padding: 8px; border-radius: 6px; margin: 0; }
-  .chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
-  .chip { font-size: 12px; border: 1px solid rgba(127,127,127,0.4); background: transparent; padding: 4px 8px; border-radius: 999px; }
   .bubble { border: 1px solid rgba(127,127,127,0.35); border-radius: 8px; padding: 8px; margin-top: 8px; }
   .bubble-header { font-weight: 600; margin-bottom: 6px; display: flex; justify-content: space-between; gap: 8px; }
   .time { font-weight: 400; opacity: 0.7; font-size: 11px; }
   .muted { opacity: 0.7; font-size: 12px; }
-  .status { margin-top: 6px; font-size: 12px; }
 </style>
 </head>
 <body>
   <h3>${escapeHtml(title)}</h3>
-  <div class="muted">Offline generator — Vitte only. No general chat.</div>
-  <div class="chip-row">
-    <button class="chip" data-preset="API HTTP / REST">API HTTP / REST</button>
-    <button class="chip" data-preset="Parsing JSON">Parsing JSON</button>
-    <button class="chip" data-preset="Lecture/écriture fichiers">Fichiers</button>
-    <button class="chip" data-preset="CLI / args">CLI / args</button>
-    <button class="chip" data-preset="Structures de données (list/map)">List / map</button>
-    <button class="chip" data-preset="Algo (tri, recherche)">Algo</button>
-    <button class="chip" data-preset="Tests / assertions">Tests</button>
-    <button class="chip" data-preset="Concurrence / async">Async</button>
-  </div>
-  <label>Prompt</label>
-  <input id="prompt" placeholder="Describe what you want" value="${prompt}" />
+  <div class="muted">Paste C/C++ code and convert to Vitte (offline).</div>
+  <label>C / C++ input</label>
+  <textarea id="c-input" placeholder="Paste C or C++ code here">${cInput}</textarea>
   <div class="row">
-    <button id="generate">Generate Vitte (Template)</button>
-    <button id="ai-generate">Generate Vitte (Local AI)</button>
+    <select id="c-flavor">
+      <option value="cpp">C++</option>
+      <option value="c">C</option>
+    </select>
+    <button id="convert">Convert to Vitte</button>
   </div>
   <div class="row">
-    <button id="insert">Insert</button>
-    <button id="copy">Copy</button>
+    <button id="insert">Insert Vitte</button>
+    <button id="copy">Copy Vitte</button>
     <button id="clear">Clear</button>
   </div>
-  <div class="status">${status ? status : ""}</div>
-  <div class="row">
-    <button id="settings">AI Settings</button>
-  </div>
-  <label style="margin-top:8px; display:block;">Output</label>
-  <pre id="output">${output || "(no suggestion yet)"}</pre>
+  <label style="margin-top:8px; display:block;">Vitte output</label>
+  <pre id="out-vitte">${outputVitte || "(no Vitte output yet)"}</pre>
   <div style="margin-top:10px;">
     <label>History</label>
     ${history || `<div class="muted">(no history yet)</div>`}
@@ -348,13 +339,10 @@ function getHtml(state: SuggestionState, title: string): string {
 
 <script>
   const vscode = acquireVsCodeApi();
-  document.getElementById('generate').addEventListener('click', () => {
-    const prompt = document.getElementById('prompt').value || '';
-    vscode.postMessage({ type: 'generate', prompt });
-  });
-  document.getElementById('ai-generate').addEventListener('click', () => {
-    const prompt = document.getElementById('prompt').value || '';
-    vscode.postMessage({ type: 'aiGenerate', prompt });
+  document.getElementById('convert').addEventListener('click', () => {
+    const input = document.getElementById('c-input').value || '';
+    const flavor = document.getElementById('c-flavor').value || 'cpp';
+    vscode.postMessage({ type: 'convertFromC', input, flavor });
   });
   document.getElementById('insert').addEventListener('click', () => {
     vscode.postMessage({ type: 'insert' });
@@ -364,17 +352,6 @@ function getHtml(state: SuggestionState, title: string): string {
   });
   document.getElementById('clear').addEventListener('click', () => {
     vscode.postMessage({ type: 'clear' });
-  });
-  document.getElementById('settings').addEventListener('click', () => {
-    vscode.postMessage({ type: 'openSettings' });
-  });
-  document.querySelectorAll('[data-preset]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const value = btn.getAttribute('data-preset') || '';
-      const input = document.getElementById('prompt');
-      input.value = value;
-      vscode.postMessage({ type: 'generate', prompt: value });
-    });
   });
 </script>
 </body>

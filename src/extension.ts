@@ -22,7 +22,8 @@ import { registerDebugConfigurationProvider } from "./debug/configurationProvide
 import { registerTelemetry } from "./utils/telemetry";
 import { registerQuickActions } from "./commands/quickActions";
 import { registerMetricsView } from "./providers/metricsView";
-import { openSuggestionsPanel, registerSuggestionsView } from "./providers/suggestionsView";
+import { registerDocumentationView } from "./providers/documentationView";
+import { registerDocsChaptersView } from "./providers/docsChaptersView";
 import {
   LanguageClient,
   TransportKind,
@@ -62,8 +63,21 @@ const OFFLINE_STATUS_BG = new vscode.ThemeColor("statusBarItem.warningBackground
 let offlineRetryTimer: NodeJS.Timeout | undefined;
 let offlineRetryMs = 60000;
 let lastActivationContext: vscode.ExtensionContext | undefined;
-let offlineLintCollection: vscode.DiagnosticCollection | undefined;
+let editorLintCollection: vscode.DiagnosticCollection | undefined;
 let offlineSince: number | undefined;
+let documentationViewsRegistered = false;
+let documentationViewsRegistrationError: string | undefined;
+
+interface ExtensionManifest {
+  version?: string;
+}
+
+function getExtensionVersion(ext: vscode.Extension<unknown> | undefined): string {
+  const manifest: unknown = ext?.packageJSON;
+  if (!manifest || typeof manifest !== "object") return "unknown";
+  const version = (manifest as ExtensionManifest).version;
+  return typeof version === "string" && version.length > 0 ? version : "unknown";
+}
 
 export interface ExtensionApi {
   getStatusText(): string;
@@ -118,7 +132,7 @@ const COMMAND_MENU_ENTRIES: readonly CommandMenuEntry[] = [
   { label: "Open bench report", description: "Latest bench report", command: "vitte.benchReport" },
   { label: "Diagnostics ▸ Refresh", description: "Re-scan diagnostics", command: "vitte.diagnostics.refresh" },
   { label: "Diagnostics ▸ Next issue", description: "Jump to next diagnostic", command: "editor.action.marker.next" },
-  { label: "Docs & Playground", description: "Open docs or playground", command: "vitte.openDocs", detail: "vitte.openDocs → playground" },
+  { label: "Documentation", description: "Open vitte.netlify.app", command: "vitte.openDocs", detail: "Online docs, auto-updated from website" },
   { label: "Quick Actions", description: "Interactive menu", command: "vitte.quickActions" },
   { label: "Server log", description: "Open log output", command: "vitte.showServerLog" },
   { label: "Server metrics", description: "Show performance snapshot", command: "vitte.showServerMetrics" },
@@ -325,20 +339,22 @@ function scheduleOfflineRetry(): void {
   if (!offlineRetryTimer) {
     offlineRetryMs = Math.max(base, offlineRetryMs);
     offlineRetryMs = Math.min(offlineRetryMs, max);
-    offlineRetryTimer = setTimeout(async () => {
+    offlineRetryTimer = setTimeout(() => {
       offlineRetryTimer = undefined;
-      try {
-        const ok = await restartClient(lastActivationContext ?? undefined);
-        if (ok) {
-          offlineRetryMs = base;
-          cancelOfflineRetry();
-          return;
+      void (async () => {
+        try {
+          const ok = await restartClient(lastActivationContext ?? undefined);
+          if (ok) {
+            offlineRetryMs = base;
+            cancelOfflineRetry();
+            return;
+          }
+          throw new Error("restart failed");
+        } catch {
+          offlineRetryMs = Math.min(offlineRetryMs * 2, max);
+          scheduleOfflineRetry();
         }
-        throw new Error("restart failed");
-      } catch {
-        offlineRetryMs = Math.min(offlineRetryMs * 2, max);
-        scheduleOfflineRetry();
-      }
+      })();
     }, offlineRetryMs);
   }
 }
@@ -488,8 +504,18 @@ async function showStartupCommandPrompt(context: vscode.ExtensionContext): Promi
 }
 export async function activate(context: vscode.ExtensionContext): Promise<ExtensionApi | undefined> {
   lastActivationContext = context;
-  output = vscode.window.createOutputChannel("Vitte Language Server", { log: true });
-  statusItem = vscode.window.createStatusBarItem("vitte.status", vscode.StatusBarAlignment.Right, 100);
+  try {
+    output = vscode.window.createOutputChannel("Vitte Language Server", { log: true });
+  } catch {
+    output = vscode.window.createOutputChannel("Vitte Language Server");
+  }
+  output.appendLine("[activate] begin");
+  output.appendLine("[activate] Vitte extension activated");
+  try {
+    statusItem = vscode.window.createStatusBarItem("vitte.status", vscode.StatusBarAlignment.Right, 100);
+  } catch {
+    statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  }
   statusItem.name = "Vitte LSP";
   statusItem.command = "vitte.showServerLog";
   context.subscriptions.push(output, statusItem);
@@ -500,26 +526,73 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   void showStartupCommandPrompt(context);
   void setServerOnlineContext(false);
 
-  // Register webview providers early (do not depend on server start)
-  const generatorLog = (message: string) => {
-    output.appendLine(`[generator] ${message}`);
-  };
-  registerSuggestionsView(context, "vitteExplorer", "Vitte Code Generator", generatorLog);
-  registerSuggestionsView(context, "vitteSuggestions", "Vitte Offline Suggestions", generatorLog);
+  // Register command shortcuts early so they're available even if later init fails.
+  context.subscriptions.push(
+    vscode.commands.registerCommand('vitte.openDocs', () => vscode.env.openExternal(vscode.Uri.parse("https://vitte.netlify.app"))),
+    vscode.commands.registerCommand("vitte.docs.openChapter", async (url?: string) => {
+      if (typeof url !== "string" || url.length === 0) return;
+      await vscode.env.openExternal(vscode.Uri.parse(url));
+    }),
+    vscode.commands.registerCommand('vitte.openPlayground', () => PlaygroundPanel.createOrShow(context)),
+    vscode.commands.registerCommand("vitte.debugActivationStatus", async () => {
+      const ext =
+        vscode.extensions.getExtension("vittestudio.vitte-studio")
+        ?? vscode.extensions.getExtension("VitteStudio.vitte-studio");
+      const viewsRegistered = documentationViewsRegistered ? "yes" : "no";
+      const viewErr = documentationViewsRegistrationError ?? "none";
+      const clientState = client ? ClientState[client.state] : "none";
+      const details = [
+        `id=${ext?.id ?? "unknown"}`,
+        `version=${getExtensionVersion(ext)}`,
+        `isActive=${String(ext?.isActive ?? false)}`,
+        `clientState=${clientState}`,
+        `documentationViewsRegistered=${viewsRegistered}`,
+        `documentationViewsRegistrationError=${viewErr}`,
+      ].join("\n");
+      output.appendLine(`[activate-debug]\n${details}`);
+      output.show(true);
+      await vscode.window.showInformationMessage(`Vitte activation status:\n${details}`);
+    })
+  );
+  output.appendLine("[activate] command registered: vitte.openDocs");
 
-  await startClient(context);
+  // Register documentation views early (do not depend on server start)
+  const viewRegistrationErrors: string[] = [];
+  try {
+    registerDocumentationView(context, "vitteExplorer", "Vitte Documentation");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    viewRegistrationErrors.push(`vitteExplorer: ${message}`);
+    output.appendLine(`[activate] view registration failed (vitteExplorer): ${message}`);
+  }
+  try {
+    registerDocsChaptersView(context, "vitteSuggestions");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    viewRegistrationErrors.push(`vitteSuggestions: ${message}`);
+    output.appendLine(`[activate] view registration failed (vitteSuggestions): ${message}`);
+  }
+  documentationViewsRegistered = viewRegistrationErrors.length === 0;
+  documentationViewsRegistrationError = viewRegistrationErrors.length > 0
+    ? viewRegistrationErrors.join(" | ")
+    : undefined;
+
+  void startClient(context).catch((err) => {
+    const message = err instanceof Error ? err.message : String(err);
+    output.appendLine(`[activate] startClient failed: ${message}`);
+  });
   if (isOfflineEffective()) {
     void showOfflineBanner(offlineReason ?? (isOfflinePermanent()
       ? "Offline permanent (user-forced)."
       : "Offline mode is enabled (vitte.server.offline)."));
   }
 
-  offlineLintCollection = vscode.languages.createDiagnosticCollection("vitte-offline");
-  context.subscriptions.push(offlineLintCollection);
-  context.subscriptions.push(vscode.workspace.onDidOpenTextDocument((doc) => updateOfflineLint(doc)));
-  context.subscriptions.push(vscode.workspace.onDidChangeTextDocument((e) => updateOfflineLint(e.document)));
-  context.subscriptions.push(vscode.workspace.onDidCloseTextDocument((doc) => offlineLintCollection?.delete(doc.uri)));
-  for (const doc of vscode.workspace.textDocuments) updateOfflineLint(doc);
+  editorLintCollection = vscode.languages.createDiagnosticCollection("vitte-lint");
+  context.subscriptions.push(editorLintCollection);
+  context.subscriptions.push(vscode.workspace.onDidOpenTextDocument((doc) => updateEditorLint(doc)));
+  context.subscriptions.push(vscode.workspace.onDidChangeTextDocument((e) => updateEditorLint(e.document)));
+  context.subscriptions.push(vscode.workspace.onDidCloseTextDocument((doc) => editorLintCollection?.delete(doc.uri)));
+  for (const doc of vscode.workspace.textDocuments) updateEditorLint(doc);
 
   // Debug & runtime tooling
   registerDebugConfigurationProvider(context);
@@ -528,17 +601,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   registerBuildTasks(context);
   registerBenchTasks(context);
   registerQuickActions(context);
-  await registerTelemetry(context);
-
-  // Sidebar: Vitte generator + docs/playground shortcuts
-  context.subscriptions.push(
-    vscode.commands.registerCommand('vitte.openDocs', () => {
-      const uri = vscode.Uri.file(path.join(context.extensionPath, 'media', 'docs.html'));
-      return vscode.commands.executeCommand('vscode.open', uri);
-    }),
-    vscode.commands.registerCommand('vitte.openPlayground', () => PlaygroundPanel.createOrShow(context)),
-    vscode.commands.registerCommand('vitte.openGeneratorPanel', () => openSuggestionsPanel(context, "Vitte Code Generator", generatorLog))
-  );
+  try {
+    await registerTelemetry(context);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    output.appendLine(`[activate] telemetry init failed: ${message}`);
+  }
 
   // Commandes
   context.subscriptions.push(
@@ -742,8 +810,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
         setOfflineStatus("Offline permanent (user-forced).");
       }
     }
-    if (e.affectsConfiguration("vitte.lint") || e.affectsConfiguration("vitte.server.offline") || e.affectsConfiguration("vitte.server.offlinePermanent")) {
-      for (const doc of vscode.workspace.textDocuments) updateOfflineLint(doc);
+    if (e.affectsConfiguration("vitte.lint") || e.affectsConfiguration("vitte.features.lint") || e.affectsConfiguration("vitte.server.offline") || e.affectsConfiguration("vitte.server.offlinePermanent")) {
+      for (const doc of vscode.workspace.textDocuments) updateEditorLint(doc);
     }
   }));
 
@@ -1033,7 +1101,7 @@ async function readOfflineReport(): Promise<string> {
   report.push(`- workspaceFolders: ${(vscode.workspace.workspaceFolders ?? []).length}`);
   report.push(`- openDocs: ${vscode.workspace.textDocuments.length}`);
   report.push(`- diagnostics (local): ${summarizeWorkspaceDiagnostics().errors} errors, ${summarizeWorkspaceDiagnostics().warnings} warnings`);
-  report.push(`- offlineLog: ${await getOfflineLogPathSafe()}`);
+  report.push(`- offlineLog: ${getOfflineLogPathSafe()}`);
   const tail = await readOfflineLogTail(30);
   if (tail) {
     report.push(`\n## offline.log (last 30 lines)\n${tail}`);
@@ -1041,7 +1109,7 @@ async function readOfflineReport(): Promise<string> {
   return report.join("\n");
 }
 
-async function getOfflineLogPathSafe(): Promise<string> {
+function getOfflineLogPathSafe(): string {
   try {
     const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const base = folder ?? os.tmpdir();
@@ -1053,7 +1121,7 @@ async function getOfflineLogPathSafe(): Promise<string> {
 
 async function readOfflineLogTail(lines: number): Promise<string> {
   try {
-    const filePath = await getOfflineLogPathSafe();
+    const filePath = getOfflineLogPathSafe();
     const content = await fs.promises.readFile(filePath, "utf8");
     const rows = content.trim().split(/\r?\n/);
     return rows.slice(-lines).join("\n");
@@ -1066,17 +1134,17 @@ function isVitteDocument(doc: vscode.TextDocument): boolean {
   return LANGUAGE_SET.has(doc.languageId as typeof LANGUAGES[number]);
 }
 
-function updateOfflineLint(doc: vscode.TextDocument): void {
-  if (!offlineLintCollection) return;
-  if (!isOfflineEffective()) {
-    offlineLintCollection.delete(doc.uri);
+function updateEditorLint(doc: vscode.TextDocument): void {
+  if (!editorLintCollection) return;
+  const cfg = vscode.workspace.getConfiguration("vitte");
+  if (!cfg.get<boolean>("features.lint", true)) {
+    editorLintCollection.delete(doc.uri);
     return;
   }
   if (!isVitteDocument(doc)) {
-    offlineLintCollection.delete(doc.uri);
+    editorLintCollection.delete(doc.uri);
     return;
   }
-  const cfg = vscode.workspace.getConfiguration("vitte");
   const lintCfg = cfg.get<{ maxLineLength?: number; allowTabs?: boolean; allowTrailingWhitespace?: boolean }>("lint") ?? {};
   const maxLineLength = typeof lintCfg.maxLineLength === "number" ? lintCfg.maxLineLength : 120;
   const allowTabs = lintCfg.allowTabs === true;
@@ -1099,22 +1167,113 @@ function updateOfflineLint(doc: vscode.TextDocument): void {
       const m = /[ \t]+$/.exec(line);
       if (m) {
         const start = m.index ?? Math.max(0, line.length - m[0].length);
-        diagnostics.push(new vscode.Diagnostic(
+        const trailing = new vscode.Diagnostic(
           new vscode.Range(i, start, i, line.length),
           "Espaces en fin de ligne.",
           vscode.DiagnosticSeverity.Hint
-        ));
+        );
+        trailing.tags = [vscode.DiagnosticTag.Unnecessary];
+        diagnostics.push(trailing);
       }
     }
     if (maxLineLength > 0 && line.length > maxLineLength) {
       diagnostics.push(new vscode.Diagnostic(
         new vscode.Range(i, maxLineLength, i, line.length),
         `Ligne trop longue (${line.length} > ${maxLineLength}).`,
-        vscode.DiagnosticSeverity.Information
+        vscode.DiagnosticSeverity.Hint
       ));
     }
   }
-  offlineLintCollection.set(doc.uri, diagnostics);
+  diagnostics.push(...buildBracketDiagnostics(lines));
+  editorLintCollection.set(doc.uri, diagnostics);
+}
+
+function buildBracketDiagnostics(lines: string[]): vscode.Diagnostic[] {
+  const diagnostics: vscode.Diagnostic[] = [];
+  const stack: Array<{ char: "(" | "[" | "{"; line: number; col: number }> = [];
+  const pairs: Record<string, "(" | "[" | "{"> = { ")": "(", "]": "[", "}": "{" };
+  const openers = new Set(["(", "[", "{"]);
+  const closers = new Set([")", "]", "}"]);
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    const rawLine = lines[lineIndex] ?? "";
+    const codeLine = normalizeForBracketScan(rawLine);
+    for (let col = 0; col < codeLine.length; col++) {
+      const char = codeLine[col];
+      if (!char) continue;
+      if (openers.has(char)) {
+        stack.push({ char: char as "(" | "[" | "{", line: lineIndex, col });
+        continue;
+      }
+      if (!closers.has(char)) continue;
+      const expected = pairs[char];
+      const top = stack[stack.length - 1];
+      if (!top || top.char !== expected) {
+        diagnostics.push(new vscode.Diagnostic(
+          new vscode.Range(lineIndex, col, lineIndex, col + 1),
+          `Parenthèse/accolade fermante inattendue "${char}".`,
+          vscode.DiagnosticSeverity.Error
+        ));
+        continue;
+      }
+      stack.pop();
+    }
+  }
+
+  for (const entry of stack) {
+    const expected = entry.char === "(" ? ")" : entry.char === "[" ? "]" : "}";
+    diagnostics.push(new vscode.Diagnostic(
+      new vscode.Range(entry.line, entry.col, entry.line, entry.col + 1),
+      `Parenthèse/accolade ouvrante "${entry.char}" non fermée (attendu: "${expected}").`,
+      vscode.DiagnosticSeverity.Error
+    ));
+  }
+  return diagnostics;
+}
+
+function normalizeForBracketScan(line: string): string {
+  let result = "";
+  let inSingle = false;
+  let inDouble = false;
+  let inTemplate = false;
+  let escaped = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i] ?? "";
+    const next = i + 1 < line.length ? (line[i + 1] ?? "") : "";
+
+    if (!inSingle && !inDouble && !inTemplate && ch === "/" && next === "/") {
+      break;
+    }
+    if (escaped) {
+      escaped = false;
+      result += " ";
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      result += " ";
+      continue;
+    }
+    if (!inDouble && !inTemplate && ch === "'") {
+      inSingle = !inSingle;
+      result += " ";
+      continue;
+    }
+    if (!inSingle && !inTemplate && ch === "\"") {
+      inDouble = !inDouble;
+      result += " ";
+      continue;
+    }
+    if (!inSingle && !inDouble && ch === "`") {
+      inTemplate = !inTemplate;
+      result += " ";
+      continue;
+    }
+    result += inSingle || inDouble || inTemplate ? " " : ch;
+  }
+
+  return result;
 }
 
 function sleep(ms: number): Promise<void> { return new Promise(res => setTimeout(res, ms)); }
